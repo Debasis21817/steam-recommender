@@ -10,7 +10,6 @@ Improvements:
 - Plotly interactive charts
 - Search-first UX
 """
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -18,7 +17,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import plotly.express as px
 
-from recommendation_model import GameRecommender
+import sys
+import os
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT)
+
+from model.recommendation_model import GameRecommender
 
 STEAM_API = "https://store.steampowered.com/api/appdetails"
 
