@@ -33,7 +33,7 @@ USD_TO_INR = 84.0
 @st.cache_data
 def load_data():
 
-    df = pd.read_csv("games.csv")
+   df = pd.read_csv("dataset/games.csv")
 
     df.fillna({
         "win": 0,
