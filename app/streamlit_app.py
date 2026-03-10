@@ -30,10 +30,14 @@ STEAM_API = "https://store.steampowered.com/api/appdetails"
 USD_TO_INR = 84.0
 
 
+import os
+
 @st.cache_data
 def load_data():
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_path = os.path.join(ROOT, "dataset", "games.csv")
 
-   df = pd.read_csv("dataset/games.csv")
+    df = pd.read_csv(data_path)
 
     df.fillna({
         "win": 0,
