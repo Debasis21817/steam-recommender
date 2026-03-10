@@ -44,8 +44,14 @@ def load_data():
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(BASE_DIR, "games.csv")
 
-    df = load_and_clean_data(data_path)
-    df = engineer_features(df)
+    df = pd.read_csv(data_path)
+
+    df.fillna({
+        "win": 0,
+        "mac": 0,
+        "linux": 0,
+        "steam_deck": 0
+    }, inplace=True)
 
     return df
 
