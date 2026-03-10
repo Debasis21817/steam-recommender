@@ -37,7 +37,7 @@ def load_data():
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_path = os.path.join(ROOT, "dataset", "games.csv")
 
-    df = pd.read_csv(data_path)
+    df = pd.read_csv("../dataset/games.csv")
 
     df.fillna({
         "win": 0,
