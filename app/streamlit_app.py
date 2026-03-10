@@ -35,6 +35,19 @@ from utils.data_processing import (
 )
 from model.recommendation_model import GameRecommender
 
+@st.cache_data
+def load_data():
+    df = pd.read_csv("games.csv")
+
+    df.fillna({
+        "win": 0,
+        "mac": 0,
+        "linux": 0,
+        "steam_deck": 0
+    }, inplace=True)
+
+    return df
+
 
 # ── Currency conversion ────────────────────────────────────────────────────────
 USD_TO_INR = 84.0   # approximate; update as needed
