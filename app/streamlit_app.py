@@ -3,6 +3,12 @@ Steam AI Game Recommendation Engine
 Fast Streamlit Version
 """
 
+import sys
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(BASE_DIR)
+
 import os
 import json
 import urllib.request
