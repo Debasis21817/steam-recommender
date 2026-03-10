@@ -1,154 +1,201 @@
 """
 utils/data_processing.py
-------------------------
-Handles all data loading, cleaning, and feature engineering for the
-Steam AI Game Recommendation Engine.
+-------------------------
+Loads, cleans, and feature-engineers the Steam games dataset.
+
+Fixes applied
+─────────────
+  #2  discount column name: engineer_features() now creates "discount" (not
+      "discount_percentage") so it matches FEATURE_COLS in recommendation_model.py.
+  #3  Targeted NA filling instead of drop-all-NA: each column gets a sensible
+      default (False for booleans, 0 for numerics, "Unknown" for strings).
+  #6  genre/tag data is preserved and exposed so the sidebar filter works.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
 
-# ─────────────────────────────────────────────
-# 1.  LOAD & CLEAN
-# ─────────────────────────────────────────────
+# ── Column defaults for targeted NA filling (fix #3) ──────────────────────────
+_BOOL_COLS   = ["win", "mac", "linux", "steam_deck"]
+_NUMERIC_COLS = [
+    "price_final", "price_original", "positive_ratio",
+    "user_reviews", "rating",
+]
+_STR_COLS = ["title", "tags", "genres", "developers"]
 
-def load_and_clean_data(filepath: str) -> pd.DataFrame:
+# Minimum reviews a game needs to appear in trending / leaderboard
+MIN_REVIEWS_TRENDING = 100
+
+
+def load_and_clean_data(csv_path: str) -> pd.DataFrame:
     """
-    Load the games CSV, clean it, and return a tidy DataFrame.
-
-    Steps
-    -----
-    - Drop rows with any missing values
-    - Convert date_release to datetime
-    - Cast boolean platform columns to int (0 / 1)
-    - Remove exact duplicate titles (keep first occurrence)
-    - Reset the index so it runs 0 … N-1
+    Loads the CSV and applies targeted, column-aware NA filling (fix #3).
+    Rows are only dropped when core identity columns (app_id, title) are
+    missing — never because a platform flag or price is absent.
     """
-    df = pd.read_csv(filepath)
+    df = pd.read_csv(csv_path, low_memory=False)
 
-    # ── Drop rows that are incomplete ──────────────────────────────────
-    df.dropna(inplace=True)
+    # ── Drop only truly un-usable rows ────────────────────────────────────────
+    df.dropna(subset=["app_id", "title"], inplace=True)
+    df.drop_duplicates(subset=["app_id"], inplace=True)
 
-    # ── Parse release date ─────────────────────────────────────────────
-    df["date_release"] = pd.to_datetime(df["date_release"], errors="coerce")
-    df.dropna(subset=["date_release"], inplace=True)          # remove unparseable dates
-
-    # ── Boolean / string → integer for platform columns ───────────────
-    bool_cols = ["win", "mac", "linux", "steam_deck"]
-    for col in bool_cols:
-        if df[col].dtype == bool:
-            df[col] = df[col].astype(int)
+    # ── Boolean platform columns: missing → False ──────────────────────────────
+    for col in _BOOL_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna(False).astype(bool).astype(int)
         else:
-            # handle string "true"/"false" that some CSV readers leave as str
-            df[col] = df[col].astype(str).str.lower().map({"true": 1, "false": 0})
+            df[col] = 0
 
-    # ── Remove duplicate game titles ───────────────────────────────────
-    df.drop_duplicates(subset="title", keep="first", inplace=True)
+    # ── Numeric columns: missing → 0 ──────────────────────────────────────────
+    for col in _NUMERIC_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0.0
 
-    df.reset_index(drop=True, inplace=True)
-    return df
+    # ── String / tag columns: missing → empty string ──────────────────────────
+    for col in _STR_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str)
+        else:
+            df[col] = ""
 
+    # ── Release date ──────────────────────────────────────────────────────────
+    if "date_release" in df.columns:
+        df["date_release"] = pd.to_datetime(df["date_release"], errors="coerce")
+    else:
+        df["date_release"] = pd.NaT
 
-# ─────────────────────────────────────────────
-# 2.  FEATURE ENGINEERING
-# ─────────────────────────────────────────────
+    # ── Coerce app_id to int ───────────────────────────────────────────────────
+    df["app_id"] = pd.to_numeric(df["app_id"], errors="coerce").fillna(0).astype(int)
+
+    return df.reset_index(drop=True)
+
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add derived numeric features used by the recommendation model.
+    Derives model features from the cleaned dataframe.
 
-    New columns
-    -----------
-    popularity_score   : weighted blend of positive_ratio and log(user_reviews)
-    discount_percentage: fraction of original price saved
-    game_age           : years since release
-    trending_score     : positive_ratio × log(user_reviews)
+    Fix #2: the discount column is named "discount" (not "discount_percentage")
+    so it aligns with FEATURE_COLS in recommendation_model.py.
     """
-    current_year = datetime.now().year
+    df = df.copy()
 
-    # Guard against log(0) by clipping reviews to at least 1
-    reviews_safe = df["user_reviews"].clip(lower=1)
+    # ── Discount (fix #2: must match FEATURE_COLS key "discount") ─────────────
+    if "price_original" in df.columns and "price_final" in df.columns:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df["discount"] = np.where(
+                df["price_original"] > 0,
+                (df["price_original"] - df["price_final"]) / df["price_original"] * 100,
+                0.0,
+            )
+    else:
+        df["discount"] = 0.0
 
-    # ── popularity_score ──────────────────────────────────────────────
+    df["discount"] = df["discount"].clip(0, 100).fillna(0)
+
+    # ── Review-based scores ───────────────────────────────────────────────────
+    df["positive_ratio"] = df["positive_ratio"].clip(0, 100)
+
+    log_reviews = np.log1p(df["user_reviews"])
     df["popularity_score"] = (
-        (df["positive_ratio"] / 100) * 0.7          # normalise ratio to [0,1]
-        + np.log(reviews_safe) * 0.3
-    )
+        df["positive_ratio"] / 100.0 * log_reviews
+    ).fillna(0)
 
-    # ── discount_percentage ───────────────────────────────────────────
-    df["discount_percentage"] = np.where(
-        df["price_original"] > 0,
-        (df["price_original"] - df["price_final"]) / df["price_original"],
-        0.0,
-    )
+    # ── Trending score (recency-weighted popularity) ───────────────────────────
+    now = pd.Timestamp.now()
+    days_old = (now - df["date_release"]).dt.days.fillna(3650).clip(lower=1)
+    recency   = np.exp(-days_old / 730)          # half-life ≈ 2 years
+    df["trending_score"] = df["popularity_score"] * (1 + recency)
 
-    # ── game_age ──────────────────────────────────────────────────────
-    df["game_age"] = current_year - df["date_release"].dt.year
+    # ── Price log (robust to free games) ──────────────────────────────────────
+    df["log_price"] = np.log1p(df["price_final"])
 
-    # ── trending_score ────────────────────────────────────────────────
-    df["trending_score"] = (df["positive_ratio"] / 100) * np.log(reviews_safe)
+    # ── Combined text column for TF-IDF (used by recommendation model) ────────
+    df["text_features"] = (
+        df.get("tags",   pd.Series([""] * len(df))).astype(str)
+        + " "
+        + df.get("genres", pd.Series([""] * len(df))).astype(str)
+    ).str.strip()
 
     return df
 
 
-# ─────────────────────────────────────────────
-# 3.  FILTER HELPERS
-# ─────────────────────────────────────────────
+# ── Filtering helpers ─────────────────────────────────────────────────────────
 
-def filter_by_platform(df: pd.DataFrame,
-                        windows: bool = True,
-                        mac: bool = False,
-                        linux: bool = False,
-                        steam_deck: bool = False) -> pd.DataFrame:
-    """
-    Return rows that support *at least one* of the selected platforms.
-    If no platform is selected the original DataFrame is returned unchanged.
-    """
-    conditions = []
-    if windows:
-        conditions.append(df["win"] == 1)
-    if mac:
-        conditions.append(df["mac"] == 1)
-    if linux:
-        conditions.append(df["linux"] == 1)
-    if steam_deck:
-        conditions.append(df["steam_deck"] == 1)
-
-    if not conditions:
+def filter_by_platform(
+    df: pd.DataFrame,
+    win: bool, mac: bool, linux: bool, deck: bool,
+) -> pd.DataFrame:
+    """Keep games that support at least one of the chosen platforms."""
+    if not any([win, mac, linux, deck]):
         return df
-
-    combined = conditions[0]
-    for cond in conditions[1:]:
-        combined = combined | cond
-
-    return df[combined]
-
-
-def filter_by_price(df: pd.DataFrame,
-                    min_price: float = 0.0,
-                    max_price: float = 60.0) -> pd.DataFrame:
-    """Keep only games whose final price falls within [min_price, max_price]."""
-    return df[(df["price_final"] >= min_price) & (df["price_final"] <= max_price)]
+    mask = pd.Series(False, index=df.index)
+    if win:   mask |= df["win"].astype(bool)
+    if mac:   mask |= df["mac"].astype(bool)
+    if linux: mask |= df["linux"].astype(bool)
+    if deck:  mask |= df["steam_deck"].astype(bool)
+    return df[mask]
 
 
-def filter_by_min_ratio(df: pd.DataFrame, min_ratio: float = 0.0) -> pd.DataFrame:
-    """Keep only games with positive_ratio >= min_ratio (0–100 scale)."""
+def filter_by_price(
+    df: pd.DataFrame,
+    min_price: float, max_price: float,
+) -> pd.DataFrame:
+    """Keep free games OR games within the USD price range."""
+    mask = (df["price_final"] == 0) | (
+        (df["price_final"] >= min_price) & (df["price_final"] <= max_price)
+    )
+    return df[mask]
+
+
+def filter_by_min_ratio(df: pd.DataFrame, min_ratio: int) -> pd.DataFrame:
     return df[df["positive_ratio"] >= min_ratio]
 
 
-# ─────────────────────────────────────────────
-# 4.  TRENDING GAMES
-# ─────────────────────────────────────────────
+def filter_by_genre(df: pd.DataFrame, genres: list[str]) -> pd.DataFrame:
+    """
+    Keep games whose tags/genres column contains at least one of the
+    selected genres (case-insensitive substring match).  New in fix #6.
+    """
+    if not genres:
+        return df
+    pattern = "|".join(re.escape(g) for g in genres)
+    text_col = df.get("text_features", df.get("tags", df.get("genres", pd.Series([""] * len(df)))))
+    return df[text_col.str.contains(pattern, case=False, na=False, regex=True)]
+
 
 def get_trending_games(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    if df.empty or "trending_score" not in df.columns:
+        return df.head(top_n)
+    filtered = df[df["user_reviews"] >= MIN_REVIEWS_TRENDING]
+    if filtered.empty:
+        filtered = df
+    return filtered.sort_values("trending_score", ascending=False).head(top_n)
+
+
+def get_available_genres(df: pd.DataFrame) -> list[str]:
     """
-    Return the top-N games ranked by trending_score.
-    Assumes engineer_features() has already been called.
+    Extract a sorted deduplicated list of genre/tag values from the dataset
+    for use in the sidebar filter widget (fix #6).
     """
-    return (
-        df.sort_values("trending_score", ascending=False)
-        .head(top_n)
-        .reset_index(drop=True)
-    )
+    import re
+    col = "text_features" if "text_features" in df.columns else (
+          "genres"        if "genres"        in df.columns else None)
+    if col is None:
+        return []
+    raw = df[col].dropna().astype(str)
+    tokens: set[str] = set()
+    for entry in raw:
+        for token in re.split(r"[,;|]+", entry):
+            t = token.strip()
+            if t and len(t) > 1:
+                tokens.add(t)
+    return sorted(tokens, key=str.lower)
+
+
+# ── re import needed inside filter_by_genre ───────────────────────────────────
+import re  # noqa: E402 (placed after functions that reference it via string)
