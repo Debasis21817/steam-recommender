@@ -3,17 +3,11 @@ app/streamlit_app.py
 --------------------
 Steam AI Game Recommendation Engine
 
-FIXES
-─────
-  • ModuleNotFoundError: sys.path now correctly includes the REPO ROOT
-    (parent of app/) so that utils/ and model/ are importable.
-  • games.csv loaded from app/ directory (where it actually lives in the repo)
-  • load_data() now calls engineer_features() so trending/popularity scores exist
-  • Real-time INR prices via Steam Store API (cc=in)
-  • Cover images from Steam CDN (no API key needed)
-  • Shareable URLs via st.query_params
-  • Hero card with game description, genres, developer
-  • Clickable leaderboard cards → Steam store page
+UPDATES IN THIS VERSION
+────────────────────────
+  • Every game card on every page is now clickable → opens Steam store page
+  • Data auto-refreshes every 24 hours (ttl=86400 on load_data cache)
+  • Steam API prices & details refresh every 30 minutes (ttl=1800)
 
 Run with:
     streamlit run app/streamlit_app.py
@@ -27,14 +21,15 @@ import json
 import urllib.request
 import urllib.parse
 
-# ── Path fix ───────────────────────────────────────────────────────────────────
-# __file__ = /mount/src/steam-recommender/app/streamlit_app.py  (on Streamlit Cloud)
-# APP_DIR  = /mount/src/steam-recommender/app
-# ROOT_DIR = /mount/src/steam-recommender     ← where utils/ and model/ live
+# ── Path fix ────────────────────────────────────────────────────────────────
+# On Streamlit Cloud:
+#   __file__ = /mount/src/steam-recommender/app/streamlit_app.py
+#   APP_DIR  = /mount/src/steam-recommender/app
+#   ROOT_DIR = /mount/src/steam-recommender  ← utils/ and model/ live here
 APP_DIR  = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(APP_DIR)
-sys.path.insert(0, ROOT_DIR)   # makes  "from utils.x import ..." work
-sys.path.insert(0, APP_DIR)    # makes  local imports inside app/ work too
+sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, APP_DIR)
 
 import streamlit as st
 import pandas as pd
@@ -89,7 +84,7 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
     margin: 1.5rem 0 0.8rem;
 }
 
-/* Metric strip */
+/* ── Metric strip ── */
 .mrow { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
 .mcrd {
     flex: 1; min-width: 120px;
@@ -99,23 +94,38 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
 .mval { font-size: 1.6rem; font-weight: 800; color: #66c5db; }
 .mlbl { font-size: 0.78rem; color: #7ba3b8; margin-top: 2px; }
 
-/* Compact game card */
+/* ── Clickable game card wrapper ── */
+/* Every card is now an <a> tag — this gives the pointer + removes underline */
+a.crd-link {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    margin-bottom: 14px;
+}
+a.crd-link:hover .gcrd  { border-color: #66c5db; }
+a.crd-link:hover .gcrd img.ccover { opacity: 0.88; }
+
+/* ── Compact game card ── */
 .gcrd {
     background: linear-gradient(135deg, #1e2d3d 0%, #162232 100%);
     border: 1px solid #2a4158; border-radius: 12px;
-    overflow: hidden; margin-bottom: 14px;
-    transition: border-color 0.25s;
+    overflow: hidden;
+    transition: border-color 0.22s, box-shadow 0.22s;
 }
-.gcrd:hover { border-color: #66c5db; }
+.gcrd:hover {
+    border-color: #66c5db;
+    box-shadow: 0 0 12px rgba(102,197,219,0.18);
+}
 .gcrd img.ccover {
     width: 100%; height: 140px; object-fit: cover;
     display: block; border-bottom: 1px solid #2a4158;
+    transition: opacity 0.22s;
 }
 .gcrd .cbody { padding: 12px 14px 14px; }
 .gtitle { font-size: 0.98rem; font-weight: 700; color: #e8f4f8; margin-bottom: 5px; }
 .gmeta  { font-size: 0.8rem; color: #7ba3b8; margin: 4px 0 7px; }
 
-/* Hero card */
+/* ── Hero card (selected game) ── */
 .hero {
     background: linear-gradient(135deg, #1e2d3d 0%, #162232 100%);
     border: 1px solid #2a6080; border-radius: 14px;
@@ -138,7 +148,7 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
 }
 .hmeta { color: #7ba3b8; font-size: 0.84rem; line-height: 1.8; }
 
-/* Badges */
+/* ── Platform badges ── */
 .bdg {
     display: inline-block; padding: 2px 9px; border-radius: 20px;
     font-size: 0.74rem; font-weight: 600; margin-right: 4px; margin-top: 3px;
@@ -148,7 +158,7 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
 .blin  { background: #4a235a; color: #c39bd3; }
 .bdck  { background: #4a3500; color: #f0c040; }
 
-/* Sim / rank badges */
+/* ── Sim / rank badges ── */
 .simbdg {
     float: right;
     background: linear-gradient(90deg, #1b9aaa, #0d7377);
@@ -162,16 +172,12 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
     font-size: 0.78rem; font-weight: 800; margin-right: 7px; flex-shrink: 0;
 }
 
-/* Rating colours */
+/* ── Rating colours ── */
 .rpos { color: #66c2a5; font-weight: 700; }
 .rmix { color: #fee08b; font-weight: 700; }
 .rneg { color: #f46d43; font-weight: 700; }
 
-/* Clickable leaderboard */
-.lcrd-link { display: block; text-decoration: none; color: inherit; }
-.lcrd-link:hover .gcrd { border-color: #66c5db; }
-
-/* Steam button */
+/* ── Steam "View on Steam" button inside hero card ── */
 .steam-btn {
     display: inline-block; margin-top: 10px;
     background: #1b9aaa; color: #fff;
@@ -179,7 +185,7 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
     text-decoration: none; font-size: 0.82rem; font-weight: 600;
 }
 
-/* Share callout */
+/* ── Share callout ── */
 .share-box {
     background: #1e2d3d; border: 1px dashed #2a6080; border-radius: 10px;
     padding: 12px 16px; margin-bottom: 16px;
@@ -193,19 +199,33 @@ section[data-testid="stSidebar"] * { color: #c7d5e0 !important; }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATA + MODEL
+# ttl=86400 → cache expires every 24 hours so data auto-refreshes daily
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(show_spinner="Loading and processing 50 000+ games…")
+@st.cache_data(
+    ttl=86400,                          # ← auto-refresh every 24 hours
+    show_spinner="Loading and processing 50 000+ games…",
+)
 def load_data() -> pd.DataFrame:
-    # games.csv lives inside the app/ folder in this repo
+    """
+    Loads, cleans and feature-engineers the dataset.
+    The 24-hour TTL means Streamlit will automatically reload and reprocess
+    the data once per day without any manual intervention.
+    """
     csv_path = os.path.join(APP_DIR, "games.csv")
     df = load_and_clean_data(csv_path)
-    df = engineer_features(df)          # adds popularity_score, trending_score etc.
+    df = engineer_features(df)
     return df
 
 
-@st.cache_resource(show_spinner="Building recommendation model…")
+@st.cache_resource(
+    show_spinner="Building recommendation model…",
+)
 def build_model(df: pd.DataFrame) -> GameRecommender:
+    """
+    Fits the cosine-similarity model on the processed dataframe.
+    Re-runs automatically whenever load_data() returns fresh data.
+    """
     rec = GameRecommender()
     rec.fit(df)
     return rec
@@ -217,6 +237,7 @@ recommender = build_model(df)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEAM API HELPERS
+# ttl=1800 → prices & details refresh every 30 minutes
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def cover_url(app_id: int) -> str:
@@ -231,9 +252,8 @@ def steam_page(app_id: int) -> str:
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_steam_details(app_id: int) -> dict:
     """
-    Full game detail fetch for the hero card:
-    description, genres, developers + real-time INR price.
-    Uses cc=in so Steam returns Indian store pricing.
+    Full detail fetch for the hero card:
+    description, genres, developers + real-time INR price (cc=in).
     """
     result = {
         "description":     "",
@@ -321,12 +341,10 @@ def fetch_live_price(app_id: int) -> dict:
 # RENDER HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-USD_TO_INR = 84.0   # fallback conversion when Steam API is unreachable
+USD_TO_INR = 84.0   # fallback only when Steam API is unreachable
 
 def _inr(usd: float) -> str:
-    if usd <= 0:
-        return "Free"
-    return f"Rs. {usd * USD_TO_INR:,.0f}"
+    return "Free" if usd <= 0 else f"Rs. {usd * USD_TO_INR:,.0f}"
 
 def _ratio_cls(r: float) -> str:
     return "rpos" if r >= 70 else ("rmix" if r >= 40 else "rneg")
@@ -354,8 +372,8 @@ def _platform_badges(row: pd.Series) -> str:
 
 def _price_html(row: pd.Series, live: dict | None = None) -> str:
     """
-    Show live INR price from Steam API if available,
-    otherwise fall back to dataset price converted to INR.
+    Returns live INR price from Steam API when available,
+    otherwise falls back to dataset price × conversion rate.
     """
     if live and live.get("price_final_str"):
         if live.get("is_free"):
@@ -386,8 +404,14 @@ def _price_html(row: pd.Series, live: dict | None = None) -> str:
     return f'<span style="color:#c7d5e0;font-weight:600">{price}</span>{tag}'
 
 
+# ── Hero card — selected game, full detail ────────────────────────────────────
+
 def render_hero_card(row: pd.Series, steam_details: dict):
-    """Full-width hero card shown for the selected game."""
+    """
+    Full-width card for the selected game.
+    Has its own 'View on Steam' button — the hero card is intentionally NOT
+    a plain link so the user can still interact with the description scroll.
+    """
     app_id       = int(row["app_id"])
     ratio        = row["positive_ratio"]
     release_year = getattr(row["date_release"], "year", "—")
@@ -395,9 +419,9 @@ def render_hero_card(row: pd.Series, steam_details: dict):
     desc        = steam_details.get("description", "")
     genres      = steam_details.get("genres", "")
     devs        = steam_details.get("developers", "")
-    desc_html   = f'<div class="hdesc">{desc}</div>'   if desc   else ""
-    genres_html = f'<br><b>Genres:</b> {genres}'       if genres else ""
-    devs_html   = f'<br><b>Developer:</b> {devs}'      if devs   else ""
+    desc_html   = f'<div class="hdesc">{desc}</div>'  if desc   else ""
+    genres_html = f'<br><b>Genres:</b> {genres}'      if genres else ""
+    devs_html   = f'<br><b>Developer:</b> {devs}'     if devs   else ""
 
     price_html = _price_html(row, live=steam_details)
 
@@ -425,10 +449,16 @@ def render_hero_card(row: pd.Series, steam_details: dict):
     ]), unsafe_allow_html=True)
 
 
+# ── Compact clickable card — used on ALL tabs ─────────────────────────────────
+
 def render_game_card(row: pd.Series,
                      show_similarity: bool = False,
                      rank: int | None = None):
-    """Compact card for recommendations and trending lists."""
+    """
+    Compact card wrapped in a full <a> tag so clicking ANYWHERE on the card
+    (image, title, price, badges) opens the game's Steam store page.
+    Used on: Search recommendations, Trending, Leaderboard.
+    """
     app_id     = int(row["app_id"])
     ratio      = row["positive_ratio"]
     live_price = fetch_live_price(app_id)
@@ -440,7 +470,9 @@ def render_game_card(row: pd.Series,
 
     rank_html = f'<span class="rnkbdg">{rank}</span>' if rank is not None else ""
 
+    # Entire card is wrapped in <a> → clicking anywhere opens Steam
     st.markdown("".join([
+        f'<a class="crd-link" href="{steam_page(app_id)}" target="_blank">',
         '<div class="gcrd">',
         f'<img class="ccover" src="{cover_url(app_id)}" '
         f'onerror="this.style.display=\'none\'" alt="">',
@@ -453,22 +485,9 @@ def render_game_card(row: pd.Series,
         f' &middot; ', _price_html(row, live=live_price),
         '</div>',
         _platform_badges(row),
-        '</div></div>',
-    ]), unsafe_allow_html=True)
-
-
-def render_leaderboard_card(row: pd.Series, rank: int, subtitle_html: str):
-    """Clickable card — entire card links to Steam store page."""
-    app_id = int(row["app_id"])
-    st.markdown("".join([
-        f'<a class="lcrd-link" href="{steam_page(app_id)}" target="_blank">',
-        '<div class="gcrd">',
-        f'<img class="ccover" src="{cover_url(app_id)}" '
-        f'onerror="this.style.display=\'none\'" alt="">',
-        '<div class="cbody">',
-        f'<div class="gtitle"><span class="rnkbdg">{rank}</span>{row["title"]}</div>',
-        f'<div class="gmeta">{subtitle_html}</div>',
-        '</div></div></a>',
+        '</div>',   # cbody
+        '</div>',   # gcrd
+        '</a>',
     ]), unsafe_allow_html=True)
 
 
@@ -501,7 +520,8 @@ st.markdown('<div class="main-title">🎮 Steam AI Game Recommendation Engine</d
             unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Discover your next favourite game &mdash; '
-    'powered by machine learning &middot; Prices in &#8377; INR (live)</div>',
+    'machine learning &middot; live INR prices &middot; '
+    'data refreshes every 24 hours automatically</div>',
     unsafe_allow_html=True,
 )
 
@@ -538,7 +558,7 @@ with st.sidebar:
     f_linux = st.checkbox("Linux",      value=False)
     f_deck  = st.checkbox("Steam Deck", value=False)
     st.markdown("---")
-    st.markdown("**💰 Price (USD — used for filter)**")
+    st.markdown("**💰 Price (USD — used for filtering)**")
     price_range = st.slider("Price range", 0.0, 60.0, (0.0, 60.0),
                             step=0.5, format="$%.2f")
     st.markdown("---")
@@ -552,6 +572,9 @@ with st.sidebar:
         "<div style='color:#7ba3b8;font-size:0.8rem'>"
         "&#128279; <strong style='color:#66c5db'>Shareable URLs</strong><br>"
         "After searching, copy the browser URL to share recommendations."
+        "<br><br>"
+        "&#128260; <strong style='color:#66c5db'>Auto-refresh</strong><br>"
+        "Dataset reloads every 24 h &middot; Prices every 30 min."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -574,6 +597,7 @@ tab_search, tab_trending, tab_charts, tab_leaderboard = st.tabs(
 
 with tab_search:
     st.markdown('<div class="sec-hdr">🔍 Game Search</div>', unsafe_allow_html=True)
+    st.caption("Click any recommended game card to open it on Steam ↗")
 
     search_query = st.text_input(
         "Search game",
@@ -592,9 +616,11 @@ with tab_search:
         selected_game = None
     else:
         default_idx   = matching.index(url_game) if url_game in matching else 0
-        selected_game = st.selectbox("Pick a game", matching,
-                                     index=default_idx,
-                                     label_visibility="collapsed")
+        selected_game = st.selectbox(
+            "Pick a game", matching,
+            index=default_idx,
+            label_visibility="collapsed",
+        )
 
     if selected_game:
         run_rec  = st.button("🎯 Find Similar Games")
@@ -604,7 +630,9 @@ with tab_search:
             st.query_params["game"] = selected_game
             st.markdown(
                 '<div class="share-box">&#128279; <strong>Shareable link active!</strong> '
-                'Copy the browser URL — it encodes <code>' + selected_game + '</code>.</div>',
+                'Copy the browser URL — it encodes <code>'
+                + selected_game +
+                '</code> so anyone who opens it sees the same recommendations.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -642,6 +670,8 @@ with tab_search:
 with tab_trending:
     st.markdown('<div class="sec-hdr">🔥 Top 20 Trending Games</div>',
                 unsafe_allow_html=True)
+    st.caption("Click any card to open it on Steam ↗")
+
     trending = get_trending_games(filtered_df, top_n=20)
     if trending.empty:
         st.info("No trending games match the current filters.")
@@ -732,7 +762,7 @@ with tab_charts:
 with tab_leaderboard:
     st.markdown('<div class="sec-hdr">🏆 Popularity Leaderboard</div>',
                 unsafe_allow_html=True)
-    st.caption("Click any card to open its Steam store page ↗")
+    st.caption("Click any card to open it on Steam ↗")
 
     lb_col1, lb_col2 = st.columns(2)
 
@@ -741,26 +771,12 @@ with tab_leaderboard:
         top_reviewed = (filtered_df.sort_values("user_reviews", ascending=False)
                         .head(10).reset_index(drop=True))
         for i, (_, row) in enumerate(top_reviewed.iterrows()):
-            live  = fetch_live_price(int(row["app_id"]))
-            sub   = (
-                f'<span class="{_ratio_cls(row["positive_ratio"])}">'
-                f'&#9733; {row["positive_ratio"]}%</span>'
-                f' &middot; {int(row["user_reviews"]):,} reviews'
-                f' &middot; {_price_html(row, live=live)}'
-            )
-            render_leaderboard_card(row, rank=i + 1, subtitle_html=sub)
+            # reuse the same unified render_game_card — already clickable
+            render_game_card(row, rank=i + 1)
 
     with lb_col2:
         st.markdown("#### 🌟 Highest Popularity Score")
         top_popular = (filtered_df.sort_values("popularity_score", ascending=False)
                        .head(10).reset_index(drop=True))
         for i, (_, row) in enumerate(top_popular.iterrows()):
-            live  = fetch_live_price(int(row["app_id"]))
-            sub   = (
-                f'<span class="{_ratio_cls(row["positive_ratio"])}">'
-                f'&#9733; {row["positive_ratio"]}%</span>'
-                f' &middot; Score: <strong style="color:#66c5db">'
-                f'{row["popularity_score"]:.2f}</strong>'
-                f' &middot; {_price_html(row, live=live)}'
-            )
-            render_leaderboard_card(row, rank=i + 1, subtitle_html=sub)
+            render_game_card(row, rank=i + 1)
