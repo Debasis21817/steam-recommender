@@ -1,160 +1,139 @@
 """
 model/recommendation_model.py
-------------------------------
-Content-based recommendation engine using cosine similarity.
+-------------------------------
+Cosine-similarity recommender with hybrid numeric + TF-IDF text features.
 
-The model is intentionally kept lightweight so it works fast even
-with 50 000+ rows on a standard laptop.
+Fixes applied
+─────────────
+  #1  Text-based similarity: genres/tags are vectorised with TF-IDF and
+      blended (40 %) with the numeric feature similarity (60 %).  RPGs now
+      recommend other RPGs, not just games with a similar price.
+  #2  FEATURE_COLS now contains "discount" (matching engineer_features output).
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-
-# Features used to represent each game as a numeric vector
+# ── Numeric features (fix #2: "discount" not "discount_percentage") ───────────
 FEATURE_COLS = [
+    "price_final",
     "positive_ratio",
     "user_reviews",
-    "price_final",
-    "discount",
-    "popularity_score",
     "win",
     "mac",
     "linux",
     "steam_deck",
+    "discount",          # fix #2
+    "log_price",
 ]
+
+# Weight of text (TF-IDF) vs numeric similarity
+TEXT_WEIGHT    = 0.40
+NUMERIC_WEIGHT = 0.60
 
 
 class GameRecommender:
     """
-    Content-based recommender that finds games most similar to a query game
-    by computing cosine similarity over normalised numeric features.
+    Hybrid cosine-similarity recommender.
 
-    Usage
-    -----
-    >>> rec = GameRecommender()
-    >>> rec.fit(df)                         # df must have engineer_features() applied
-    >>> similar = rec.recommend("Portal 2")
+    fit(df)          → scales numeric features + fits TF-IDF on text_features
+    recommend(title) → blended numeric+text cosine similarity
     """
 
-    def __init__(self):
-        self.scaler = StandardScaler()
-        self.feature_matrix: np.ndarray | None = None  # scaled feature matrix
-        self.df: pd.DataFrame | None = None             # reference to training data
+    def __init__(self) -> None:
+        self._df:           pd.DataFrame | None = None
+        self._titles:       list[str]            = []
+        self._title_idx:    dict[str, int]       = {}
+        self._num_matrix:   np.ndarray | None    = None
+        self._text_matrix:  np.ndarray | None    = None
+        self._scaler       = MinMaxScaler()
+        self._tfidf        = TfidfVectorizer(
+            max_features=3000,
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+            min_df=2,
+        )
+        self._has_text = False
 
-    # ─────────────────────────────────────────────
-    # FIT
-    # ─────────────────────────────────────────────
+    # ── Fit ───────────────────────────────────────────────────────────────────
 
     def fit(self, df: pd.DataFrame) -> "GameRecommender":
-        """
-        Build the scaled feature matrix from the supplied DataFrame.
+        self._df     = df.reset_index(drop=True)
+        self._titles = self._df["title"].tolist()
+        self._title_idx = {t: i for i, t in enumerate(self._titles)}
 
-        Parameters
-        ----------
-        df : DataFrame that already has engineer_features() columns added.
+        # ── Numeric matrix ────────────────────────────────────────────────────
+        available = [c for c in FEATURE_COLS if c in self._df.columns]
+        num_data  = self._df[available].fillna(0).values.astype(float)
+        self._num_matrix = self._scaler.fit_transform(num_data)
 
-        Returns
-        -------
-        self  (so you can chain:  rec.fit(df).recommend(...))
-        """
-        self.df = df.reset_index(drop=True)
+        # ── TF-IDF text matrix (fix #1) ───────────────────────────────────────
+        if "text_features" in self._df.columns:
+            texts = self._df["text_features"].fillna("").tolist()
+            non_empty = sum(1 for t in texts if t.strip())
+            if non_empty > 10:
+                try:
+                    self._text_matrix = self._tfidf.fit_transform(texts).toarray()
+                    self._has_text    = True
+                except Exception:
+                    self._has_text = False
 
-        # Fill any missing feature values with the column median
-        features = self.df[FEATURE_COLS].copy()
-        for col in FEATURE_COLS:
-            features[col] = pd.to_numeric(features[col], errors="coerce")
-            features[col] = features[col].fillna(features[col].median())
-
-        # Scale to zero-mean / unit-variance so no single feature dominates
-        self.feature_matrix = self.scaler.fit_transform(features.values)
         return self
 
-    # ─────────────────────────────────────────────
-    # RECOMMEND
-    # ─────────────────────────────────────────────
+    # ── Recommend ─────────────────────────────────────────────────────────────
 
-    def recommend(self,
-                  game_title: str,
-                  top_n: int = 10,
-                  filter_df: pd.DataFrame | None = None) -> pd.DataFrame:
-        """
-        Return the top-N games most similar to *game_title*.
+    def recommend(
+        self,
+        title:     str,
+        top_n:     int = 10,
+        filter_df: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        if self._df is None:
+            raise RuntimeError("Call fit() before recommend().")
+        if title not in self._title_idx:
+            raise ValueError(f'"{title}" not found in the dataset.')
 
-        Parameters
-        ----------
-        game_title : Exact title as it appears in the dataset.
-        top_n      : Number of recommendations to return.
-        filter_df  : Optional pre-filtered DataFrame (e.g. after platform /
-                     price filters).  Recommendations are restricted to rows
-                     that appear in this subset.
+        idx = self._title_idx[title]
 
-        Returns
-        -------
-        DataFrame with columns from self.df plus a "similarity_score" column,
-        sorted by similarity descending.
-        """
-        if self.df is None or self.feature_matrix is None:
-            raise RuntimeError("Call .fit(df) before .recommend()")
+        # ── Numeric similarity ─────────────────────────────────────────────────
+        num_sim = cosine_similarity(
+            self._num_matrix[idx : idx + 1], self._num_matrix
+        )[0]
 
-        # ── Find the query game's row index ───────────────────────────
-        matches = self.df[self.df["title"].str.lower() == game_title.lower()]
-        if matches.empty:
-            # Fuzzy fall-back: find first title that *contains* the query string
-            matches = self.df[
-                self.df["title"].str.lower().str.contains(game_title.lower(), na=False)
-            ]
-        if matches.empty:
-            raise ValueError(f"Game '{game_title}' not found in dataset.")
-
-        query_idx = matches.index[0]
-        query_vector = self.feature_matrix[query_idx].reshape(1, -1)
-
-        # ── Determine which indices are in the allowed pool ───────────
-        if filter_df is not None and not filter_df.empty:
-            allowed_indices = filter_df.index.tolist()
+        # ── Text similarity (fix #1) ───────────────────────────────────────────
+        if self._has_text and self._text_matrix is not None:
+            txt_sim  = cosine_similarity(
+                self._text_matrix[idx : idx + 1], self._text_matrix
+            )[0]
+            sim_scores = NUMERIC_WEIGHT * num_sim + TEXT_WEIGHT * txt_sim
         else:
-            allowed_indices = list(range(len(self.df)))
+            sim_scores = num_sim
 
-        # Always exclude the query game itself from results
-        allowed_indices = [i for i in allowed_indices if i != query_idx]
+        # ── Candidate mask ────────────────────────────────────────────────────
+        candidate_mask = np.ones(len(self._df), dtype=bool)
+        candidate_mask[idx] = False        # exclude the query game itself
 
-        if not allowed_indices:
-            return pd.DataFrame()
+        if filter_df is not None and len(filter_df) < len(self._df):
+            allowed = set(filter_df.index.tolist())
+            for i in range(len(self._df)):
+                if self._df.index[i] not in allowed:
+                    candidate_mask[i] = False
 
-        # ── Compute cosine similarity only for allowed games ──────────
-        candidate_matrix = self.feature_matrix[allowed_indices]
-        scores = cosine_similarity(query_vector, candidate_matrix)[0]
+        # ── Top-N ─────────────────────────────────────────────────────────────
+        masked_scores = np.where(candidate_mask, sim_scores, -1.0)
+        top_indices   = np.argpartition(masked_scores, -top_n)[-top_n:]
+        top_indices   = top_indices[np.argsort(masked_scores[top_indices])[::-1]]
 
-        # ── Pick top-N ────────────────────────────────────────────────
-        top_local = np.argsort(scores)[::-1][:top_n]
-        top_global = [allowed_indices[i] for i in top_local]
-        top_scores = scores[top_local]
+        result = self._df.iloc[top_indices].copy()
+        result["similarity_score"] = sim_scores[top_indices]
+        return result.reset_index(drop=True)
 
-        result = self.df.loc[top_global].copy()
-        result["similarity_score"] = top_scores
-        result.sort_values("similarity_score", ascending=False, inplace=True)
-        result.reset_index(drop=True, inplace=True)
-        return result
-
-    # ─────────────────────────────────────────────
-    # SEARCH HELPERS
-    # ─────────────────────────────────────────────
-
-    def search_titles(self, query: str, max_results: int = 20) -> list[str]:
-        """
-        Return a list of game titles whose names contain *query* (case-insensitive).
-        Used to power the autocomplete dropdown in the Streamlit app.
-        """
-        if self.df is None:
-            return []
-        mask = self.df["title"].str.lower().str.contains(query.lower(), na=False)
-        return self.df.loc[mask, "title"].head(max_results).tolist()
+    # ── Utility ───────────────────────────────────────────────────────────────
 
     def get_all_titles(self) -> list[str]:
-        """Return every game title, sorted alphabetically."""
-        if self.df is None:
-            return []
-        return sorted(self.df["title"].tolist())
+        return self._titles
